@@ -17,13 +17,20 @@ use url::Url;
 
 const HEAD_BACKOFF: Duration = Duration::new(1, 0);
 const CHECKPOINT_BLOCK_INTERVAL: u64 = 10;
+const MAX_BLOCK_HISTORY: usize = 64;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
-    next_block_number: u64,
+    latest_blocks: Vec<BlockInfo>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+struct BlockInfo {
+    number: u64,
     #[serde_as(as = "UfeHex")]
-    last_block_hash: FieldElement,
+    hash: FieldElement,
 }
 
 #[tokio::main]
@@ -58,19 +65,22 @@ async fn run(
 
     println!("{}", temp_checkpoint_file_path.to_string_lossy());
 
-    let mut last_checkpoint: Checkpoint = if checkpoint_path.exists() {
-        let mut checkpoint_file = File::open(checkpoint_path)?;
-        serde_json::from_reader(&mut checkpoint_file)?
+    let mut checkpoint: Checkpoint = if checkpoint_path.exists() {
+        serde_json::from_reader(&mut File::open(checkpoint_path)?)?
     } else {
         Checkpoint {
-            next_block_number: 0,
-            last_block_hash: FieldElement::ZERO,
+            latest_blocks: vec![],
         }
     };
 
     loop {
+        let (expected_parent_hash, current_block_number) = match checkpoint.latest_blocks.last() {
+            Some(last_block) => (last_block.hash, last_block.number + 1),
+            None => (FieldElement::ZERO, 0),
+        };
+
         let current_block = match jsonrpc_client
-            .get_block_with_txs(&BlockId::Number(last_checkpoint.next_block_number))
+            .get_block_with_txs(&BlockId::Number(current_block_number))
             .await
         {
             Ok(block) => match block {
@@ -87,22 +97,30 @@ async fn run(
             Err(_) => anyhow::bail!("Retry on failure not implemented"),
         };
 
-        if current_block.parent_hash != last_checkpoint.last_block_hash {
-            anyhow::bail!("Reorg handling not implemented");
+        if current_block.parent_hash != expected_parent_hash {
+            if checkpoint.latest_blocks.len() == 1 {
+                // Not possible to determine common ancestor
+                anyhow::bail!("Unable to handle reorg after consuming the whole history");
+            } else {
+                checkpoint.latest_blocks.pop();
+                continue;
+            }
         }
 
         handle_block(jsonrpc_client, &current_block).await?;
 
-        last_checkpoint = Checkpoint {
-            next_block_number: last_checkpoint.next_block_number + 1,
-            last_block_hash: current_block.block_hash,
+        let new_block_info = BlockInfo {
+            number: current_block.block_number,
+            hash: current_block.block_hash,
         };
 
-        if last_checkpoint.next_block_number % CHECKPOINT_BLOCK_INTERVAL == 0 {
-            serde_json::to_writer(
-                &mut File::create(&temp_checkpoint_file_path)?,
-                &last_checkpoint,
-            )?;
+        if checkpoint.latest_blocks.len() >= MAX_BLOCK_HISTORY {
+            checkpoint.latest_blocks.remove(0);
+        }
+        checkpoint.latest_blocks.push(new_block_info);
+
+        if current_block.block_number % CHECKPOINT_BLOCK_INTERVAL == 0 {
+            serde_json::to_writer(&mut File::create(&temp_checkpoint_file_path)?, &checkpoint)?;
             std::fs::rename(&temp_checkpoint_file_path, checkpoint_path)?;
         }
     }
