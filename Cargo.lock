@@ -766,6 +766,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
  "starknet",
  "tokio",
  "url",

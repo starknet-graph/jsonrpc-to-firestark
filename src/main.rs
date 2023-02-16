@@ -1,12 +1,14 @@
-use std::{env, io::Write, time::Duration};
+use std::{env, fs::File, io::Write, path::PathBuf, time::Duration};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use starknet::{
-    core::types::FieldElement,
+    core::{serde::unsigned_field_element::UfeHex, types::FieldElement},
     providers::jsonrpc::{
         models::{
             BlockId, BlockWithTxs, EmittedEvent, ErrorCode, EventFilter, InvokeTransaction,
-            MaybePendingBlockWithTxHashes, MaybePendingBlockWithTxs, Transaction,
+            MaybePendingBlockWithTxs, Transaction,
         },
         HttpTransport, JsonRpcClient, JsonRpcClientError, RpcError,
     },
@@ -14,6 +16,15 @@ use starknet::{
 use url::Url;
 
 const HEAD_BACKOFF: Duration = Duration::new(1, 0);
+const CHECKPOINT_BLOCK_INTERVAL: u64 = 10;
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+struct Checkpoint {
+    next_block_number: u64,
+    #[serde_as(as = "UfeHex")]
+    last_block_hash: FieldElement,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,6 +32,11 @@ async fn main() -> Result<()> {
         .expect("Environment variable JSONRPC not found")
         .parse::<Url>()
         .expect("Invalid JSONRPC URL");
+    let checkpoint_path = env::var("CHECKPOINT_FILE")
+        .expect("Environment variable CHECKPOINT_FILE not found")
+        .parse::<PathBuf>()
+        .expect("Invalid checkpoint file path");
+
     let jsonrpc_client = JsonRpcClient::new(HttpTransport::new_with_client(
         jsonrpc_url,
         reqwest::ClientBuilder::new()
@@ -28,35 +44,33 @@ async fn main() -> Result<()> {
             .build()?,
     ));
 
-    run_from_block(&jsonrpc_client, 0).await?;
+    run(&jsonrpc_client, &checkpoint_path).await?;
 
     Ok(())
 }
 
-async fn run_from_block(
+async fn run(
     jsonrpc_client: &JsonRpcClient<HttpTransport>,
-    start_block_number: u64,
+    checkpoint_path: &PathBuf,
 ) -> Result<()> {
-    let mut last_block_hash = if start_block_number == 0 {
-        FieldElement::ZERO
-    } else {
-        let last_block = jsonrpc_client
-            .get_block_with_tx_hashes(&BlockId::Number(start_block_number - 1))
-            .await?;
+    let temp_checkpoint_file_path =
+        PathBuf::from(&format!("{}.tmp", checkpoint_path.to_string_lossy()));
 
-        match last_block {
-            MaybePendingBlockWithTxHashes::Block(block) => block.block_hash,
-            MaybePendingBlockWithTxHashes::PendingBlock(_) => {
-                anyhow::bail!("Unexpected pending block")
-            }
+    println!("{}", temp_checkpoint_file_path.to_string_lossy());
+
+    let mut last_checkpoint: Checkpoint = if checkpoint_path.exists() {
+        let mut checkpoint_file = File::open(checkpoint_path)?;
+        serde_json::from_reader(&mut checkpoint_file)?
+    } else {
+        Checkpoint {
+            next_block_number: 0,
+            last_block_hash: FieldElement::ZERO,
         }
     };
 
-    let mut current_block_number = start_block_number;
-
     loop {
         let current_block = match jsonrpc_client
-            .get_block_with_txs(&BlockId::Number(current_block_number))
+            .get_block_with_txs(&BlockId::Number(last_checkpoint.next_block_number))
             .await
         {
             Ok(block) => match block {
@@ -73,14 +87,24 @@ async fn run_from_block(
             Err(_) => anyhow::bail!("Retry on failure not implemented"),
         };
 
-        if current_block.parent_hash != last_block_hash {
+        if current_block.parent_hash != last_checkpoint.last_block_hash {
             anyhow::bail!("Reorg handling not implemented");
         }
 
         handle_block(jsonrpc_client, &current_block).await?;
 
-        last_block_hash = current_block.block_hash;
-        current_block_number += 1;
+        last_checkpoint = Checkpoint {
+            next_block_number: last_checkpoint.next_block_number + 1,
+            last_block_hash: current_block.block_hash,
+        };
+
+        if last_checkpoint.next_block_number % CHECKPOINT_BLOCK_INTERVAL == 0 {
+            serde_json::to_writer(
+                &mut File::create(&temp_checkpoint_file_path)?,
+                &last_checkpoint,
+            )?;
+            std::fs::rename(&temp_checkpoint_file_path, checkpoint_path)?;
+        }
     }
 }
 
