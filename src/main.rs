@@ -5,8 +5,8 @@ use starknet::{
     core::types::FieldElement,
     providers::jsonrpc::{
         models::{
-            BlockId, EmittedEvent, EventFilter, InvokeTransaction, MaybePendingBlockWithTxs,
-            Transaction,
+            BlockId, BlockWithTxs, EmittedEvent, EventFilter, InvokeTransaction,
+            MaybePendingBlockWithTxHashes, MaybePendingBlockWithTxs, Transaction,
         },
         HttpTransport, JsonRpcClient,
     },
@@ -26,26 +26,57 @@ async fn main() -> Result<()> {
             .build()?,
     ));
 
-    for block_num in 0..1000 {
-        handle_block(&jsonrpc_client, block_num).await?;
-    }
+    run_from_block(&jsonrpc_client, 0).await?;
 
     Ok(())
 }
 
+async fn run_from_block(
+    jsonrpc_client: &JsonRpcClient<HttpTransport>,
+    start_block_number: u64,
+) -> Result<()> {
+    let mut last_block_hash = if start_block_number == 0 {
+        FieldElement::ZERO
+    } else {
+        let last_block = jsonrpc_client
+            .get_block_with_tx_hashes(&BlockId::Number(start_block_number - 1))
+            .await?;
+
+        match last_block {
+            MaybePendingBlockWithTxHashes::Block(block) => block.block_hash,
+            MaybePendingBlockWithTxHashes::PendingBlock(_) => {
+                anyhow::bail!("Unexpected pending block")
+            }
+        }
+    };
+
+    let mut current_block_number = start_block_number;
+
+    loop {
+        let current_block = match jsonrpc_client
+            .get_block_with_txs(&BlockId::Number(current_block_number))
+            .await?
+        {
+            MaybePendingBlockWithTxs::Block(block) => block,
+            MaybePendingBlockWithTxs::PendingBlock(_) => anyhow::bail!("Unexpected pending block"),
+        };
+
+        if current_block.parent_hash != last_block_hash {
+            anyhow::bail!("Reorg handling not implemented");
+        }
+
+        handle_block(jsonrpc_client, &current_block).await?;
+
+        last_block_hash = current_block.block_hash;
+        current_block_number += 1;
+    }
+}
+
 async fn handle_block(
     jsonrpc_client: &JsonRpcClient<HttpTransport>,
-    block_number: u64,
+    block: &BlockWithTxs,
 ) -> Result<()> {
     let mut buffer = Vec::new();
-
-    let block = jsonrpc_client
-        .get_block_with_txs(&BlockId::Number(block_number))
-        .await?;
-    let block = match block {
-        MaybePendingBlockWithTxs::Block(block) => block,
-        MaybePendingBlockWithTxs::PendingBlock(_) => anyhow::bail!("Unexpected pending block"),
-    };
 
     writeln!(&mut buffer, "FIRE BLOCK_BEGIN {}", block.block_number)?;
 
