@@ -116,6 +116,11 @@ async fn run(
             continue;
         }
 
+        println!(
+            "Processed block #{} ({:#064x})",
+            current_block.block_number, current_block.block_hash
+        );
+
         let new_block_info = BlockInfo {
             number: current_block.block_number,
             hash: current_block.block_hash,
