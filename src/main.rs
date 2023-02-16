@@ -1,6 +1,7 @@
-use std::{env, fs::File, io::Write, path::PathBuf, time::Duration};
+use std::{fs::File, io::Write, path::PathBuf, time::Duration};
 
 use anyhow::Result;
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use starknet::{
@@ -20,6 +21,15 @@ const FAILURE_BACKOFF: Duration = Duration::new(1, 0);
 const CHECKPOINT_BLOCK_INTERVAL: u64 = 50;
 const MAX_BLOCK_HISTORY: usize = 64;
 
+#[derive(Debug, Parser)]
+#[clap(author, version, about)]
+struct Cli {
+    #[clap(long, env = "JSONRPC", help = "URL of the trusted JSON-RPC endpoint")]
+    jsonrpc: Url,
+    #[clap(long, env = "CHECKPOINT_FILE", help = "Path to the checkpoint file")]
+    checkpoint: PathBuf,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
@@ -36,31 +46,24 @@ struct BlockInfo {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let jsonrpc_url = env::var("JSONRPC")
-        .expect("Environment variable JSONRPC not found")
-        .parse::<Url>()
-        .expect("Invalid JSONRPC URL");
-    let checkpoint_path = env::var("CHECKPOINT_FILE")
-        .expect("Environment variable CHECKPOINT_FILE not found")
-        .parse::<PathBuf>()
-        .expect("Invalid checkpoint file path");
+    let cli = Cli::parse();
 
     let jsonrpc_client = JsonRpcClient::new(HttpTransport::new_with_client(
-        jsonrpc_url,
+        cli.jsonrpc,
         reqwest::ClientBuilder::new()
             .timeout(Duration::from_secs(10))
             .build()?,
     ));
 
-    let mut checkpoint: Checkpoint = if checkpoint_path.exists() {
-        serde_json::from_reader(&mut File::open(&checkpoint_path)?)?
+    let mut checkpoint: Checkpoint = if cli.checkpoint.exists() {
+        serde_json::from_reader(&mut File::open(&cli.checkpoint)?)?
     } else {
         Checkpoint {
             latest_blocks: vec![],
         }
     };
 
-    run(&jsonrpc_client, &mut checkpoint, &checkpoint_path).await;
+    run(&jsonrpc_client, &mut checkpoint, &cli.checkpoint).await;
 
     Ok(())
 }
