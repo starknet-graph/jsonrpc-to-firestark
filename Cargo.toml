@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.69"
+reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls"] }
+starknet = { git = "https://github.com/xJonathanLEI/starknet-rs" }
+tokio = { version = "1.25.0", features = ["full"] }
+url = "2.3.1"
