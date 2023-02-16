@@ -16,7 +16,8 @@ use starknet::{
 use url::Url;
 
 const HEAD_BACKOFF: Duration = Duration::new(1, 0);
-const CHECKPOINT_BLOCK_INTERVAL: u64 = 10;
+const FAILURE_BACKOFF: Duration = Duration::new(1, 0);
+const CHECKPOINT_BLOCK_INTERVAL: u64 = 50;
 const MAX_BLOCK_HISTORY: usize = 64;
 
 #[serde_as]
@@ -51,28 +52,24 @@ async fn main() -> Result<()> {
             .build()?,
     ));
 
-    run(&jsonrpc_client, &checkpoint_path).await?;
-
-    Ok(())
-}
-
-async fn run(
-    jsonrpc_client: &JsonRpcClient<HttpTransport>,
-    checkpoint_path: &PathBuf,
-) -> Result<()> {
-    let temp_checkpoint_file_path =
-        PathBuf::from(&format!("{}.tmp", checkpoint_path.to_string_lossy()));
-
-    println!("{}", temp_checkpoint_file_path.to_string_lossy());
-
     let mut checkpoint: Checkpoint = if checkpoint_path.exists() {
-        serde_json::from_reader(&mut File::open(checkpoint_path)?)?
+        serde_json::from_reader(&mut File::open(&checkpoint_path)?)?
     } else {
         Checkpoint {
             latest_blocks: vec![],
         }
     };
 
+    run(&jsonrpc_client, &mut checkpoint, &checkpoint_path).await;
+
+    Ok(())
+}
+
+async fn run(
+    jsonrpc_client: &JsonRpcClient<HttpTransport>,
+    checkpoint: &mut Checkpoint,
+    checkpoint_path: &PathBuf,
+) {
     loop {
         let (expected_parent_hash, current_block_number) = match checkpoint.latest_blocks.last() {
             Some(last_block) => (last_block.hash, last_block.number + 1),
@@ -86,7 +83,9 @@ async fn run(
             Ok(block) => match block {
                 MaybePendingBlockWithTxs::Block(block) => block,
                 MaybePendingBlockWithTxs::PendingBlock(_) => {
-                    anyhow::bail!("Unexpected pending block")
+                    eprintln!("Unexpected pending block");
+                    tokio::time::sleep(FAILURE_BACKOFF).await;
+                    continue;
                 }
             },
             Err(JsonRpcClientError::RpcError(RpcError::Code(ErrorCode::BlockNotFound))) => {
@@ -94,20 +93,28 @@ async fn run(
                 tokio::time::sleep(HEAD_BACKOFF).await;
                 continue;
             }
-            Err(_) => anyhow::bail!("Retry on failure not implemented"),
+            Err(err) => {
+                eprintln!("Error downloading block: {err}");
+                tokio::time::sleep(FAILURE_BACKOFF).await;
+                continue;
+            }
         };
 
         if current_block.parent_hash != expected_parent_hash {
             if checkpoint.latest_blocks.len() == 1 {
                 // Not possible to determine common ancestor
-                anyhow::bail!("Unable to handle reorg after consuming the whole history");
+                panic!("Unable to handle reorg after consuming the whole history");
             } else {
                 checkpoint.latest_blocks.pop();
                 continue;
             }
         }
 
-        handle_block(jsonrpc_client, &current_block).await?;
+        if let Err(err) = handle_block(jsonrpc_client, &current_block).await {
+            eprintln!("Error handling block: {err}");
+            tokio::time::sleep(FAILURE_BACKOFF).await;
+            continue;
+        }
 
         let new_block_info = BlockInfo {
             number: current_block.block_number,
@@ -120,8 +127,9 @@ async fn run(
         checkpoint.latest_blocks.push(new_block_info);
 
         if current_block.block_number % CHECKPOINT_BLOCK_INTERVAL == 0 {
-            serde_json::to_writer(&mut File::create(&temp_checkpoint_file_path)?, &checkpoint)?;
-            std::fs::rename(&temp_checkpoint_file_path, checkpoint_path)?;
+            if let Err(err) = try_persist_checkpoint(checkpoint_path, checkpoint) {
+                eprintln!("Error persisting checkpoint: {err}");
+            }
         }
     }
 }
@@ -231,4 +239,13 @@ async fn get_block_events(
     }
 
     Ok(events)
+}
+
+fn try_persist_checkpoint(path: &PathBuf, checkpoint: &Checkpoint) -> Result<()> {
+    let temp_path = PathBuf::from(&format!("{}.tmp", path.to_string_lossy()));
+
+    serde_json::to_writer(&mut File::create(&temp_path)?, &checkpoint)?;
+    std::fs::rename(temp_path, path)?;
+
+    Ok(())
 }
