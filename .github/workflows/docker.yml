@@ -1,0 +1,39 @@
+name: "Build Docker Image"
+
+on:
+  create:
+
+jobs:
+  build:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+    name: "Build"
+    runs-on: "ubuntu-latest"
+
+    env:
+      DOCKER_REPOSITORY: "starknet/jsonrpc-to-firestark"
+
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v3"
+
+      - name: "Login to Docker Hub"
+        uses: "docker/login-action@v1.6.0"
+        with:
+          username: "${{ secrets.DOCKER_HUB_USERNAME }}"
+          password: "${{ secrets.DOCKER_HUB_PASSWORD }}"
+
+      - name: "Determine image version"
+        run: |
+          version_line="${{ github.ref }}"
+          regex="^refs\/tags\/v(.*)$"
+          [[ $version_line =~ $regex ]];
+          echo "VERSION=${BASH_REMATCH[1]}" >> $GITHUB_ENV
+
+      - name: "Build Docker image"
+        run: |
+          docker build -t ${DOCKER_REPOSITORY}:${VERSION} -f ./Dockerfile .
+
+      - name: "Push Docker image"
+        run: |
+          docker push ${DOCKER_REPOSITORY}:${VERSION}
