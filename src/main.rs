@@ -5,13 +5,15 @@ use starknet::{
     core::types::FieldElement,
     providers::jsonrpc::{
         models::{
-            BlockId, BlockWithTxs, EmittedEvent, EventFilter, InvokeTransaction,
+            BlockId, BlockWithTxs, EmittedEvent, ErrorCode, EventFilter, InvokeTransaction,
             MaybePendingBlockWithTxHashes, MaybePendingBlockWithTxs, Transaction,
         },
-        HttpTransport, JsonRpcClient,
+        HttpTransport, JsonRpcClient, JsonRpcClientError, RpcError,
     },
 };
 use url::Url;
+
+const HEAD_BACKOFF: Duration = Duration::new(1, 0);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,10 +57,20 @@ async fn run_from_block(
     loop {
         let current_block = match jsonrpc_client
             .get_block_with_txs(&BlockId::Number(current_block_number))
-            .await?
+            .await
         {
-            MaybePendingBlockWithTxs::Block(block) => block,
-            MaybePendingBlockWithTxs::PendingBlock(_) => anyhow::bail!("Unexpected pending block"),
+            Ok(block) => match block {
+                MaybePendingBlockWithTxs::Block(block) => block,
+                MaybePendingBlockWithTxs::PendingBlock(_) => {
+                    anyhow::bail!("Unexpected pending block")
+                }
+            },
+            Err(JsonRpcClientError::RpcError(RpcError::Code(ErrorCode::BlockNotFound))) => {
+                // No new block. Wait a bit before trying again
+                tokio::time::sleep(HEAD_BACKOFF).await;
+                continue;
+            }
+            Err(_) => anyhow::bail!("Retry on failure not implemented"),
         };
 
         if current_block.parent_hash != last_block_hash {
