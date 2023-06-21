@@ -5,13 +5,16 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use starknet::{
-    core::{serde::unsigned_field_element::UfeHex, types::FieldElement},
-    providers::jsonrpc::{
-        models::{
-            BlockId, BlockWithTxs, EmittedEvent, ErrorCode, EventFilter, InvokeTransaction,
-            MaybePendingBlockWithTxs, Transaction,
+    core::{
+        serde::unsigned_field_element::UfeHex,
+        types::{
+            BlockId, BlockWithTxs, DeclareTransaction, EmittedEvent, EventFilter, FieldElement,
+            InvokeTransaction, MaybePendingBlockWithTxs, StarknetError, Transaction,
         },
-        HttpTransport, JsonRpcClient, JsonRpcClientError, RpcError,
+    },
+    providers::{
+        jsonrpc::{HttpTransport, JsonRpcClient},
+        Provider,
     },
 };
 use url::Url;
@@ -80,7 +83,7 @@ async fn run(
         };
 
         let current_block = match jsonrpc_client
-            .get_block_with_txs(&BlockId::Number(current_block_number))
+            .get_block_with_txs(BlockId::Number(current_block_number))
             .await
         {
             Ok(block) => match block {
@@ -91,7 +94,9 @@ async fn run(
                     continue;
                 }
             },
-            Err(JsonRpcClientError::RpcError(RpcError::Code(ErrorCode::BlockNotFound))) => {
+            Err(starknet::providers::ProviderError::StarknetError(
+                StarknetError::BlockNotFound,
+            )) => {
                 // No new block. Wait a bit before trying again
                 tokio::time::sleep(HEAD_BACKOFF).await;
                 continue;
@@ -154,7 +159,13 @@ async fn handle_block(
 
     for tx in block.transactions.iter() {
         let (tx_hash, type_str) = match tx {
-            Transaction::Declare(tx) => (tx.transaction_hash, "DECLARE"),
+            Transaction::Declare(tx) => (
+                match tx {
+                    DeclareTransaction::V1(tx) => tx.transaction_hash,
+                    DeclareTransaction::V2(tx) => tx.transaction_hash,
+                },
+                "DECLARE",
+            ),
             Transaction::Deploy(tx) => (tx.transaction_hash, "DEPLOY"),
             Transaction::DeployAccount(tx) => (tx.transaction_hash, "DEPLOY_ACCOUNT"),
             Transaction::Invoke(tx) => (
