@@ -14,7 +14,7 @@ use starknet::{
     },
     providers::{
         jsonrpc::{HttpTransport, JsonRpcClient},
-        Provider,
+        MaybeUnknownErrorCode, Provider, StarknetErrorWithMessage,
     },
 };
 use url::Url;
@@ -94,9 +94,10 @@ async fn run(
                     continue;
                 }
             },
-            Err(starknet::providers::ProviderError::StarknetError(
-                StarknetError::BlockNotFound,
-            )) => {
+            Err(starknet::providers::ProviderError::StarknetError(StarknetErrorWithMessage {
+                code: MaybeUnknownErrorCode::Known(StarknetError::BlockNotFound),
+                ..
+            })) => {
                 // No new block. Wait a bit before trying again
                 tokio::time::sleep(HEAD_BACKOFF).await;
                 continue;
@@ -161,6 +162,7 @@ async fn handle_block(
         let (tx_hash, type_str) = match tx {
             Transaction::Declare(tx) => (
                 match tx {
+                    DeclareTransaction::V0(tx) => tx.transaction_hash,
                     DeclareTransaction::V1(tx) => tx.transaction_hash,
                     DeclareTransaction::V2(tx) => tx.transaction_hash,
                 },
