@@ -1,0 +1,4 @@
+/target/
+/.dockerignore
+/Dockerfile
+!/target/aarch64-unknown-linux-gnu/release/jsonrpc-to-firestark

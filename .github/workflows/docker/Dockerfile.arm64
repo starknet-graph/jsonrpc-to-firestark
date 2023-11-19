@@ -1,0 +1,7 @@
+FROM --platform=linux/arm64/v8 debian:bullseye-slim
+
+LABEL org.opencontainers.image.source=https://github.com/starknet-graph/jsonrpc-to-firestark
+
+COPY ./target/aarch64-unknown-linux-gnu/release/jsonrpc-to-firestark /usr/bin/
+
+ENTRYPOINT [ "jsonrpc-to-firestark" ]
