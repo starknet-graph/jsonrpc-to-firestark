@@ -2,8 +2,8 @@ name: "Build multi-arch images"
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - "ci/temp"
 
 jobs:
   crate-info:
@@ -16,11 +16,7 @@ jobs:
       - id: "derive"
         name: "Derive crate info from Git tag"
         run: |
-          FULL_REF="${{ github.ref }}"
-          REGEX="^refs\/tags\/v(.*)$"
-          [[ $FULL_REF =~ $REGEX ]];
-
-          echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          echo "version=0.3.0" >> $GITHUB_OUTPUT
 
   build-amd64:
     name: "Build for linux/amd64"
@@ -34,6 +30,8 @@ jobs:
     steps:
       - name: "Checkout"
         uses: "actions/checkout@v3"
+        with:
+          ref: "v0.3.0"
 
       - name: "Build Docker image"
         run: |
@@ -61,6 +59,8 @@ jobs:
     steps:
       - name: "Checkout"
         uses: "actions/checkout@v3"
+        with:
+          ref: "v0.3.0"
 
       - name: "Install cross"
         run: |
@@ -72,6 +72,8 @@ jobs:
 
       - name: "Build Docker image"
         run: |
+          git fetch origin
+          git checkout origin/master .github
           docker build -t ${DOCKER_REPOSITORY}:${{ needs.crate-info.outputs.version }}-arm64 -f ./.github/workflows/docker/Dockerfile.arm64 .
 
       - name: "Export Docker image"
