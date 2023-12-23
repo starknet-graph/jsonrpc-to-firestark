@@ -8,13 +8,13 @@ use starknet::{
     core::{
         serde::unsigned_field_element::UfeHex,
         types::{
-            BlockId, BlockWithTxs, DeclareTransaction, EmittedEvent, EventFilter, FieldElement,
-            InvokeTransaction, MaybePendingBlockWithTxs, StarknetError, Transaction,
+            BlockId, BlockWithTxs, EmittedEvent, EventFilter, FieldElement,
+            MaybePendingBlockWithTxs, StarknetError, Transaction,
         },
     },
     providers::{
         jsonrpc::{HttpTransport, JsonRpcClient},
-        MaybeUnknownErrorCode, Provider, StarknetErrorWithMessage,
+        Provider,
     },
 };
 use url::Url;
@@ -94,10 +94,9 @@ async fn run(
                     continue;
                 }
             },
-            Err(starknet::providers::ProviderError::StarknetError(StarknetErrorWithMessage {
-                code: MaybeUnknownErrorCode::Known(StarknetError::BlockNotFound),
-                ..
-            })) => {
+            Err(starknet::providers::ProviderError::StarknetError(
+                StarknetError::BlockNotFound,
+            )) => {
                 // No new block. Wait a bit before trying again
                 tokio::time::sleep(HEAD_BACKOFF).await;
                 continue;
@@ -160,23 +159,10 @@ async fn handle_block(
 
     for tx in block.transactions.iter() {
         let (tx_hash, type_str) = match tx {
-            Transaction::Declare(tx) => (
-                match tx {
-                    DeclareTransaction::V0(tx) => tx.transaction_hash,
-                    DeclareTransaction::V1(tx) => tx.transaction_hash,
-                    DeclareTransaction::V2(tx) => tx.transaction_hash,
-                },
-                "DECLARE",
-            ),
+            Transaction::Declare(tx) => (*tx.transaction_hash(), "DECLARE"),
             Transaction::Deploy(tx) => (tx.transaction_hash, "DEPLOY"),
-            Transaction::DeployAccount(tx) => (tx.transaction_hash, "DEPLOY_ACCOUNT"),
-            Transaction::Invoke(tx) => (
-                match tx {
-                    InvokeTransaction::V0(tx) => tx.transaction_hash,
-                    InvokeTransaction::V1(tx) => tx.transaction_hash,
-                },
-                "INVOKE_FUNCTION",
-            ),
+            Transaction::DeployAccount(tx) => (*tx.transaction_hash(), "DEPLOY_ACCOUNT"),
+            Transaction::Invoke(tx) => (*tx.transaction_hash(), "INVOKE_FUNCTION"),
             Transaction::L1Handler(tx) => (tx.transaction_hash, "L1_HANDLER"),
         };
 

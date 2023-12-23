@@ -13,6 +13,6 @@ reqwest = { version = "0.11.18", default-features = false, features = ["rustls-t
 serde = "1.0.180"
 serde_json = "1.0.104"
 serde_with = "2.3.2"
-starknet = "0.6.0"
+starknet = { git = "https://github.com/xJonathanLEI/starknet-rs", rev = "6cadb198644cf5e942187896c2e6bb3ecc9edc6e" }
 tokio = { version = "1.29.1", features = ["full"] }
 url = "2.4.0"
