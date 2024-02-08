@@ -135,6 +135,7 @@ async fn run(
         };
 
         if checkpoint.latest_blocks.len() >= MAX_BLOCK_HISTORY {
+            // TODO: use ring buffer instead as this is extremely inefficient
             checkpoint.latest_blocks.remove(0);
         }
         checkpoint.latest_blocks.push(new_block_info);
