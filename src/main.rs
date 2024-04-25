@@ -2,6 +2,7 @@ use std::{collections::HashSet, fs::File, io::Write, path::PathBuf, time::Durati
 
 use anyhow::Result;
 use clap::Parser;
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use starknet::{
@@ -131,6 +132,12 @@ impl MaybePendingBlock {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "jsonrpc_to_firestark=debug");
+    }
+
+    env_logger::init();
+
     let cli = Cli::parse();
 
     let jsonrpc_client = JsonRpcClient::new(HttpTransport::new_with_client(
@@ -177,7 +184,7 @@ async fn run(
                 MaybePendingBlock::Confirmed(block)
             }
             Ok(MaybePendingBlockWithTxs::PendingBlock(_)) => {
-                eprintln!("Unexpected pending block");
+                error!("Unexpected pending block");
                 tokio::time::sleep(FAILURE_BACKOFF).await;
                 continue;
             }
@@ -190,7 +197,7 @@ async fn run(
                     .await
                 {
                     Ok(MaybePendingBlockWithTxs::Block(_)) => {
-                        eprintln!("Unexpected confirmed block");
+                        error!("Unexpected confirmed block");
                         tokio::time::sleep(FAILURE_BACKOFF).await;
                         continue;
                     }
@@ -198,14 +205,14 @@ async fn run(
                         // Unlike with confirmed blocks, we simply discard non-linkable pending
                         // blocks
                         if block.parent_hash != expected_parent_hash {
-                            eprintln!("Found unlinkable pending block");
+                            debug!("Found unlinkable pending block");
                             tokio::time::sleep(HEAD_BACKOFF).await;
                             continue;
                         }
 
                         if let Some(last_pending_block) = last_pending_block.as_ref() {
                             if last_pending_block.tx_count >= block.transactions.len() {
-                                eprintln!("No newer pending block found");
+                                debug!("No newer pending block found");
                                 tokio::time::sleep(HEAD_BACKOFF).await;
                                 continue;
                             }
@@ -217,14 +224,14 @@ async fn run(
                         }
                     }
                     Err(err) => {
-                        eprintln!("Error downloading pending block: {err}");
+                        error!("Error downloading pending block: {err}");
                         tokio::time::sleep(HEAD_BACKOFF).await;
                         continue;
                     }
                 }
             }
             Err(err) => {
-                eprintln!("Error downloading confirmed block: {err}");
+                error!("Error downloading confirmed block: {err}");
                 tokio::time::sleep(FAILURE_BACKOFF).await;
                 continue;
             }
@@ -242,7 +249,7 @@ async fn run(
         }
 
         if let Err(err) = handle_block(jsonrpc_client, &current_block).await {
-            eprintln!("Error handling block: {err}");
+            error!("Error handling block: {err}");
             tokio::time::sleep(FAILURE_BACKOFF).await;
             continue;
         }
@@ -250,7 +257,7 @@ async fn run(
         // Progress log
         match &current_block {
             MaybePendingBlock::Confirmed(block) => {
-                println!(
+                info!(
                     "Processed block #{} ({:#064x})",
                     block.block_number, block.block_hash
                 );
@@ -259,7 +266,7 @@ async fn run(
                 pseudo_height,
                 block,
             } => {
-                println!(
+                info!(
                     "Processed pending block with pseudo height #{} ({} transactions)",
                     pseudo_height,
                     block.transactions.len()
@@ -282,7 +289,7 @@ async fn run(
 
                 if block.block_number % CHECKPOINT_BLOCK_INTERVAL == 0 {
                     if let Err(err) = try_persist_checkpoint(checkpoint_path, checkpoint) {
-                        eprintln!("Error persisting checkpoint: {err}");
+                        error!("Error persisting checkpoint: {err}");
                     }
                 }
             }
