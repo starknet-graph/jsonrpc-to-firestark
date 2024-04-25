@@ -5,6 +5,7 @@ use clap::Parser;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use sha1::Digest;
 use starknet::{
     core::{
         serde::unsigned_field_element::UfeHex,
@@ -96,19 +97,19 @@ impl MaybePendingBlock {
                 pseudo_height,
                 block,
             } => {
-                // +-------+-----------+--------------+---------------------+------------------+
-                // | Fixed | "PENDING" | Block Number | Transaction Count   | Reserved         |
-                // | 1 byte| 7 bytes   | 8 bytes      | 4 bytes             | 12 bytes         |
-                // +-------+-----------+--------------+---------------------+------------------+
-                // |  00   |    50     |      NN      |         NN          |        00        |
-                // |       |    45     |      NN      |         NN          |        00        |
-                // |       |    4E     |      NN      |         NN          |        00        |
-                // |       |    44     |      NN      |         NN          |        00        |
-                // |       |    49     |      NN      |                     |        00        |
-                // |       |    4E     |      NN      |                     |        00        |
-                // |       |    47     |      NN      |                     |        00        |
-                // |       |           |      NN      |                     |        00        |
-                // +-------+-----------+--------------+---------------------+------------------+
+                // +--------+-----------+--------------+-------------------+----------+----------+
+                // | Fixed  | "PENDING" | Block Number | Transaction Count | Reserved | Checksum |
+                // | 1 byte | 7 bytes   | 8 bytes      | 4 bytes           | 8 bytes  | 4 bytes  |
+                // +--------+-----------+--------------+-------------------+----------+----------+
+                // |  00    |    50     |      NN      |         NN        |    00    |   NN     |
+                // |        |    45     |      NN      |         NN        |    00    |   NN     |
+                // |        |    4E     |      NN      |         NN        |    00    |   NN     |
+                // |        |    44     |      NN      |         NN        |    00    |   NN     |
+                // |        |    49     |      NN      |                   |    00    |          |
+                // |        |    4E     |      NN      |                   |    00    |          |
+                // |        |    47     |      NN      |                   |    00    |          |
+                // |        |           |      NN      |                   |    00    |          |
+                // +--------+-----------+--------------+-------------------+----------+----------+
 
                 let mut buffer = [0u8; 32];
                 buffer[1] = b'P';
@@ -122,6 +123,10 @@ impl MaybePendingBlock {
                 buffer[8..(8 + 8)].copy_from_slice(&u64::to_be_bytes(*pseudo_height));
                 buffer[(8 + 8)..(8 + 8 + 4)]
                     .copy_from_slice(&u32::to_be_bytes(block.transactions.len() as u32));
+
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(&buffer[..(8 + 8 + 4 + 8)]);
+                buffer[(8 + 8 + 4 + 8)..].copy_from_slice(&hasher.finalize()[0..4]);
 
                 // This cannot fail as the buffer is always in range
                 FieldElement::from_bytes_be(&buffer).unwrap()
