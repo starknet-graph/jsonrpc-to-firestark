@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::File, io::Write, path::PathBuf, time::Duration};
+use std::{fs::File, io::Write, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
@@ -10,8 +10,9 @@ use starknet::{
     core::{
         serde::unsigned_field_element::UfeHex,
         types::{
-            BlockId, BlockTag, BlockWithTxs, EmittedEvent, EventFilter, FieldElement,
-            MaybePendingBlockWithTxs, PendingBlockWithTxs, StarknetError, Transaction,
+            BlockId, BlockTag, BlockWithReceipts, Felt, MaybePendingBlockWithReceipts,
+            PendingBlockWithReceipts, StarknetError, Transaction, TransactionReceipt,
+            TransactionWithReceipt,
         },
     },
     providers::{
@@ -46,14 +47,14 @@ struct Checkpoint {
 struct BlockInfo {
     number: u64,
     #[serde_as(as = "UfeHex")]
-    hash: FieldElement,
+    hash: Felt,
 }
 
 enum MaybePendingBlock {
-    Confirmed(BlockWithTxs),
+    Confirmed(BlockWithReceipts),
     Pending {
         pseudo_height: u64,
-        block: PendingBlockWithTxs,
+        block: PendingBlockWithReceipts,
     },
 }
 
@@ -62,7 +63,7 @@ struct PendingBlockInfo {
 }
 
 impl MaybePendingBlock {
-    pub fn parent_hash(&self) -> FieldElement {
+    pub fn parent_hash(&self) -> Felt {
         match self {
             Self::Confirmed(block) => block.parent_hash,
             Self::Pending { block, .. } => block.parent_hash,
@@ -83,14 +84,14 @@ impl MaybePendingBlock {
         }
     }
 
-    pub fn transactions(&self) -> &[Transaction] {
+    pub fn transactions(&self) -> &[TransactionWithReceipt] {
         match self {
             Self::Confirmed(block) => &block.transactions,
             Self::Pending { block, .. } => &block.transactions,
         }
     }
 
-    pub fn block_hash(&self) -> FieldElement {
+    pub fn block_hash(&self) -> Felt {
         match self {
             Self::Confirmed(block) => block.block_hash,
             Self::Pending {
@@ -129,7 +130,7 @@ impl MaybePendingBlock {
                 buffer[(8 + 8 + 4 + 8)..].copy_from_slice(&hasher.finalize()[0..4]);
 
                 // This cannot fail as the buffer is always in range
-                FieldElement::from_bytes_be(&buffer).unwrap()
+                Felt::from_bytes_be(&buffer)
             }
         }
     }
@@ -175,20 +176,20 @@ async fn run(
     loop {
         let (expected_parent_hash, current_block_number) = match checkpoint.latest_blocks.last() {
             Some(last_block) => (last_block.hash, last_block.number + 1),
-            None => (FieldElement::ZERO, 0),
+            None => (Felt::ZERO, 0),
         };
 
         let current_block = match jsonrpc_client
-            .get_block_with_txs(BlockId::Number(current_block_number))
+            .get_block_with_receipts(BlockId::Number(current_block_number))
             .await
         {
-            Ok(MaybePendingBlockWithTxs::Block(block)) => {
+            Ok(MaybePendingBlockWithReceipts::Block(block)) => {
                 // Got a confirmed block. Clear the pending info now
                 last_pending_block = None;
 
                 MaybePendingBlock::Confirmed(block)
             }
-            Ok(MaybePendingBlockWithTxs::PendingBlock(_)) => {
+            Ok(MaybePendingBlockWithReceipts::PendingBlock(_)) => {
                 error!("Unexpected pending block");
                 tokio::time::sleep(FAILURE_BACKOFF).await;
                 continue;
@@ -198,15 +199,15 @@ async fn run(
             )) => {
                 // No new block. Try the pending block now
                 match jsonrpc_client
-                    .get_block_with_txs(BlockId::Tag(BlockTag::Pending))
+                    .get_block_with_receipts(BlockId::Tag(BlockTag::Pending))
                     .await
                 {
-                    Ok(MaybePendingBlockWithTxs::Block(_)) => {
+                    Ok(MaybePendingBlockWithReceipts::Block(_)) => {
                         error!("Unexpected confirmed block");
                         tokio::time::sleep(FAILURE_BACKOFF).await;
                         continue;
                     }
-                    Ok(MaybePendingBlockWithTxs::PendingBlock(block)) => {
+                    Ok(MaybePendingBlockWithReceipts::PendingBlock(block)) => {
                         // Unlike with confirmed blocks, we simply discard non-linkable pending
                         // blocks
                         if block.parent_hash != expected_parent_hash {
@@ -253,7 +254,7 @@ async fn run(
             }
         }
 
-        if let Err(err) = handle_block(jsonrpc_client, &current_block).await {
+        if let Err(err) = handle_block(&current_block).await {
             error!("Error handling block: {err}");
             tokio::time::sleep(FAILURE_BACKOFF).await;
             continue;
@@ -307,42 +308,13 @@ async fn run(
     }
 }
 
-async fn handle_block(
-    jsonrpc_client: &JsonRpcClient<HttpTransport>,
-    block: &MaybePendingBlock,
-) -> Result<()> {
+async fn handle_block(block: &MaybePendingBlock) -> Result<()> {
     let mut buffer = Vec::new();
 
     writeln!(&mut buffer, "FIRE BLOCK_BEGIN {}", block.height())?;
 
-    let block_events = get_block_events(jsonrpc_client, block).await?;
-
-    // When using pending blocks, there's a race condition where a new block is confirmed before
-    // the `starknet_getEvents` request. We discard the block when:
-    //
-    // 1. Event list is empty when tx list is not; or
-    // 2. Any event refers to a tx that's not in the block.
-    if let MaybePendingBlock::Pending { block, .. } = block {
-        if block_events.is_empty() && !block.transactions.is_empty() {
-            anyhow::bail!("inconsistent pending block events: empty event list");
-        }
-
-        let block_tx_set = block
-            .transactions
-            .iter()
-            .map(|tx| *tx.transaction_hash())
-            .collect::<HashSet<_>>();
-
-        if block_events
-            .iter()
-            .any(|event| !block_tx_set.contains(&event.transaction_hash))
-        {
-            anyhow::bail!("inconsistent pending block events: invalid transaction reference");
-        }
-    }
-
     for tx in block.transactions().iter() {
-        let (tx_hash, type_str) = match tx {
+        let (tx_hash, type_str) = match &tx.transaction {
             Transaction::Declare(tx) => (*tx.transaction_hash(), "DECLARE"),
             Transaction::Deploy(tx) => (tx.transaction_hash, "DEPLOY"),
             Transaction::DeployAccount(tx) => (*tx.transaction_hash(), "DEPLOY_ACCOUNT"),
@@ -352,11 +324,15 @@ async fn handle_block(
 
         writeln!(&mut buffer, "FIRE BEGIN_TRX {tx_hash:#064x} {type_str}")?;
 
-        for (ind_event, event) in block_events
-            .iter()
-            .filter(|event| event.transaction_hash == tx_hash)
-            .enumerate()
-        {
+        let tx_events = match &tx.receipt {
+            TransactionReceipt::Invoke(receipt) => &receipt.events,
+            TransactionReceipt::L1Handler(receipt) => &receipt.events,
+            TransactionReceipt::Declare(receipt) => &receipt.events,
+            TransactionReceipt::Deploy(receipt) => &receipt.events,
+            TransactionReceipt::DeployAccount(receipt) => &receipt.events,
+        };
+
+        for (ind_event, event) in tx_events.iter().enumerate() {
             writeln!(
                 &mut buffer,
                 "FIRE TRX_BEGIN_EVENT {:#064x} {:#064x}",
@@ -394,49 +370,6 @@ async fn handle_block(
     print!("{}", String::from_utf8(buffer)?);
 
     Ok(())
-}
-
-// Use `get_block_with_receipts` once we move to RPC v0.7.x
-async fn get_block_events(
-    jsonrpc_client: &JsonRpcClient<HttpTransport>,
-    block: &MaybePendingBlock,
-) -> Result<Vec<EmittedEvent>> {
-    const CHUNK_SIZE: u64 = 1000;
-
-    let mut token = None;
-    let mut events = vec![];
-
-    let event_filter = match block {
-        MaybePendingBlock::Confirmed(block) => EventFilter {
-            from_block: Some(BlockId::Hash(block.block_hash)),
-            to_block: Some(BlockId::Hash(block.block_hash)),
-            address: None,
-            keys: None,
-        },
-        MaybePendingBlock::Pending { .. } => EventFilter {
-            from_block: Some(BlockId::Tag(BlockTag::Pending)),
-            to_block: Some(BlockId::Tag(BlockTag::Pending)),
-            address: None,
-            keys: None,
-        },
-    };
-
-    loop {
-        let mut result = jsonrpc_client
-            .get_events(event_filter.clone(), token, CHUNK_SIZE)
-            .await?;
-
-        events.append(&mut result.events);
-
-        match result.continuation_token {
-            Some(new_token) => {
-                token = Some(new_token);
-            }
-            None => break,
-        }
-    }
-
-    Ok(events)
 }
 
 fn try_persist_checkpoint(path: &PathBuf, checkpoint: &Checkpoint) -> Result<()> {

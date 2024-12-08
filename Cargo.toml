@@ -14,8 +14,8 @@ log = "0.4.21"
 reqwest = { version = "0.11.18", default-features = false, features = ["rustls-tls"] }
 serde = "1.0.180"
 serde_json = "1.0.104"
-serde_with = "2.3.2"
+serde_with = "3.11.0"
 sha1 = "0.10.6"
-starknet = { git = "https://github.com/xJonathanLEI/starknet-rs", rev = "6cadb198644cf5e942187896c2e6bb3ecc9edc6e" }
+starknet = "0.12.0"
 tokio = { version = "1.29.1", features = ["full"] }
 url = "2.4.0"
